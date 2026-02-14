@@ -16,7 +16,7 @@
 #define MAX_SPEED (180 * steps_per_mm)
 #define STALL_VALUE 50 // [0..255]
 #define EN_DIR_STEP_OUTPUT 1
-#define MQTT_MAX_PACKET_SIZE 512
+#define MQTT_MAX_PACKET_SIZE 2048
 
 #define R_SENSE 0.11f
 
@@ -80,6 +80,17 @@ WiFiClient espClient;
 
 void MqttCallback(char *topic, byte *payload, unsigned int length)
 {
+    if (strcmp(topic, absolutePositionCommandTopic) == 0) {
+        char msg[length];
+
+        memcpy(msg, payload, length);
+        msg[length] = '\0';
+
+        long targetPosition = atol(msg);   // convert to long
+
+        stepper.enableOutputs();
+        stepper.moveTo(targetPosition);
+    }
 }
 
 PubSubClient pubSubClient(server, 1883, MqttCallback, espClient);
@@ -200,16 +211,17 @@ void Task2(void *pvParameters)
 
     ArduinoOTA.begin();
 
-    pubSubClient.setBufferSize(1024);
+    pubSubClient.setBufferSize(MQTT_MAX_PACKET_SIZE);
     if (pubSubClient.connect(DEVICE_ID, MQTT_USER, MQTT_PASS))
     {
         char topic[64];
         snprintf(topic, sizeof(topic), "homeassistant/device/curtain_%s/config", deviceID);
 
-        char payload[512];
+        char payload[MQTT_MAX_PACKET_SIZE];
         GetDeviceDiscoveryPayload(deviceID, payload, sizeof(payload));
 
         pubSubClient.publish(topic, payload);
+        pubSubClient.subscribe(absolutePositionCommandTopic);
     }
 
     vTaskDelete(NULL);
