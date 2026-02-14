@@ -10,11 +10,13 @@
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
 #include "secrets.h"
+#include "HA_discovery_config.h"
 
 
 #define MAX_SPEED (180 * steps_per_mm)
 #define STALL_VALUE 50 // [0..255]
 #define EN_DIR_STEP_OUTPUT 1
+#define MQTT_MAX_PACKET_SIZE 512
 
 #define R_SENSE 0.11f
 
@@ -58,16 +60,15 @@ constexpr uint32_t steps_per_mm = 80;
 
 static double Monitor_Speed;
 
-int8_t Direction = 1;
+// int8_t Direction = 1;
 double _lastLocation = 0;
 double _currentLocation = 0;
-uint32_t last_ota_time = 0;
-uint8_t stallCount = 0;
+
+char deviceID[18];
 
 void motor_init(void);
 void MT6816_init(void);
 int MT6816_read(void);
-double ReadSpeed(float ms);
 void Position1();
 void Position2();
 void Stop();
@@ -84,29 +85,52 @@ void MqttCallback(char *topic, byte *payload, unsigned int length)
 PubSubClient pubSubClient(server, 1883, MqttCallback, espClient);
 
 TimerHandle_t sensorTimer;
+void publishPosition() {
+    // Build the topic dynamically
+    char topic[64];
+    snprintf(topic, sizeof(topic),
+             "homeassistant/curtains/%s/state",
+             deviceID);
+
+    // Build JSON payload
+    JsonDocument doc;
+    doc["position"] = stepper.currentPosition();
+
+    char payload[64];
+    serializeJson(doc, payload, sizeof(payload));
+
+    // Publish
+    pubSubClient.publish(topic, payload);
+}
+
 void PublishSensors(TimerHandle_t xTimer) 
 {
     if (!pubSubClient.connected()) {
         return;
     }
 
-    JsonDocument doc;
+    // JsonDocument doc;
     
-    doc["position"] = stepper.currentPosition();
-    doc["running"] = stepper.isRunning();
-    doc["stallguard"] = driver.SG_RESULT();
-    doc["rms"] = driver.cs2rms(driver.cs_actual());
-    doc["version"] = driver.version();
-    doc["IOIN"] = driver.IOIN();
+    // doc["position"] = stepper.currentPosition();
+    // doc["running"] = stepper.isRunning();
+    // doc["stallguard"] = driver.SG_RESULT();
+    // doc["rms"] = driver.cs2rms(driver.cs_actual());
+    // doc["version"] = driver.version();
+    // doc["IOIN"] = driver.IOIN();
 
-    char buffer[256];
-    serializeJson(doc, buffer);
+    // char buffer[256];
+    // serializeJson(doc, buffer);
 
-    pubSubClient.publish("test", buffer);
+    // pubSubClient.publish("test", buffer);
+    publishPosition();
 }
 
 void setup()
 {
+    uint8_t baseMac[6];
+    esp_read_mac(baseMac, ESP_MAC_WIFI_STA);
+    sprintf(deviceID, "%02X%02X%02X%02X%02X%02X", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+
     motor_init();
     xTaskCreatePinnedToCore(Task1, "Task1", 1024 * 10, NULL, 2, NULL, 0);
     xTaskCreatePinnedToCore(Task2, "Task2", 1024 * 20, NULL, 2, NULL, 0);
@@ -125,7 +149,10 @@ void loop()
 {
     ArduinoOTA.handle();
     stepper.run();
-    pubSubClient.loop();
+    
+    if (pubSubClient.connected()) {
+        pubSubClient.loop();
+    }
 }
 
 void Task1(void *pvParameters)
@@ -138,7 +165,6 @@ void Task1(void *pvParameters)
 
     while (1)
     {
-        Monitor_Speed = ReadSpeed(100);
         button1.tick();
         button2.tick();
         button3.tick();
@@ -161,21 +187,6 @@ void Task2(void *pvParameters)
     }
     else
     {
-        Serial.print(n);
-        Serial.println(" networks found");
-        for (int i = 0; i < n; ++i)
-        {
-            // Print SSID and RSSI for each network found
-            Serial.print(i + 1);
-            Serial.print(": ");
-            Serial.print(WiFi.SSID(i));
-            Serial.print(" (");
-            Serial.print(WiFi.RSSI(i));
-            Serial.print(")");
-            Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*");
-            delay(10);
-        }
-
         if (!isConnected)
         {
             WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -183,56 +194,22 @@ void Task2(void *pvParameters)
         while (WiFi.status() != WL_CONNECTED)
         {
             delay(500);
-            Serial.print(".");
         }
-        Serial.println("");
-        Serial.println("WiFi connected");
-        Serial.println("IP address: ");
-        Serial.println(WiFi.localIP());
         isConnected = true;
     }
 
-    Serial.println("");
-
-    ArduinoOTA
-        .onStart([]()
-                 {
-      String type;
-      if (ArduinoOTA.getCommand() == U_FLASH) {
-        type = "sketch";
-      } else {  // U_SPIFFS
-        type = "filesystem";
-      }
-
-      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-      Serial.println("Start updating " + type); })
-        .onEnd([]()
-               { Serial.println("\nEnd"); })
-        .onProgress([](unsigned int progress, unsigned int total)
-                    {
-      if (millis() - last_ota_time > 500) {
-        Serial.printf("Progress: %u%%\n", (progress / (total / 100)));
-        last_ota_time = millis();
-      } })
-        .onError([](ota_error_t error)
-                 {
-      Serial.printf("Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) {
-        Serial.println("Auth Failed");
-      } else if (error == OTA_BEGIN_ERROR) {
-        Serial.println("Begin Failed");
-      } else if (error == OTA_CONNECT_ERROR) {
-        Serial.println("Connect Failed");
-      } else if (error == OTA_RECEIVE_ERROR) {
-        Serial.println("Receive Failed");
-      } else if (error == OTA_END_ERROR) {
-        Serial.println("End Failed");
-      } });
     ArduinoOTA.begin();
 
+    pubSubClient.setBufferSize(1024);
     if (pubSubClient.connect(DEVICE_ID, MQTT_USER, MQTT_PASS))
     {
-        pubSubClient.publish("test", "hello world");
+        char topic[64];
+        snprintf(topic, sizeof(topic), "homeassistant/device/curtain_%s/config", deviceID);
+
+        char payload[512];
+        GetDeviceDiscoveryPayload(deviceID, payload, sizeof(payload));
+
+        pubSubClient.publish(topic, payload);
     }
 
     vTaskDelete(NULL);
@@ -261,32 +238,6 @@ int MT6816_read(void)
     MT6816.endTransaction();
     digitalWrite(SPI_MT_CS, HIGH);
     return (int)(temp[0] << 6 | temp[1] >> 2);
-}
-
-double ReadSpeed(float ms)
-{
-    double Speed_t = 0;
-    _currentLocation = (double)MT6816_read();
-
-    if (_currentLocation == _lastLocation)
-        Speed_t = Direction = 0;
-    else
-    {
-        double temp_t = abs(_currentLocation - _lastLocation);
-        if (temp_t < 8192)
-        { // The displacement per unit time above the maximum is considered to be reversed
-            Speed_t = (temp_t * 360) / 16384;
-            Direction = _currentLocation > _lastLocation ? 1 : -1;
-        }
-        else
-        {
-            Speed_t = ((_currentLocation > _lastLocation ? 16384 - _currentLocation + _lastLocation : 16384 - _lastLocation + _currentLocation) * 360) / 16384;
-            Direction = _currentLocation > _lastLocation ? -1 : 1;
-        }
-    }
-    Speed_t = Direction * (Speed_t * ms / 1000);
-    _lastLocation = _currentLocation;
-    return Speed_t;
 }
 
 void motor_init(void)
