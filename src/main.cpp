@@ -175,8 +175,11 @@ void PublishSensors(TimerHandle_t xTimer)
     if (!pubSubClient.connected()) {
         return;
     }
+    
     publishState();
     publishRelPosition();
+
+    xTimerChangePeriod(sensorTimer, pdMS_TO_TICKS( stepper.isRunning() ? 100 : 1000 ), 10);
 }
 
 void setup()
