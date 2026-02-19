@@ -4,6 +4,7 @@
 char coverPositionTopic[64];
 char coverCommandTopic[64];
 char absolutePositionCommandTopic[64];
+char speedCommandTopic[64];
 char minimumButtonCommandTopic[64];
 char maximumButtonCommandTopic[64];
 
@@ -32,13 +33,24 @@ bool GetDeviceDiscoveryPayload(const char* id, char* buffer, size_t bufferSize) 
     JsonObject positionCmp = cmps["position"].to<JsonObject>();
     positionCmp["p"] = "sensor";
     positionCmp["name"] = "position";
-    // positionCmp["device_class"] = "Number";
     positionCmp["unit_of_measurement"] = "Steps";
     positionCmp["value_template"] = "{{ value_json.position }}";
 
     char positionId[32];
     snprintf(positionId, sizeof(positionId), "%s_position", id);
     positionCmp["unique_id"] = positionId;
+
+
+
+    JsonObject stallguard = cmps["stallguard"].to<JsonObject>();
+    stallguard["p"] = "sensor";
+    stallguard["name"] = "stallguard";
+    stallguard["unit_of_measurement"] = "resistance";
+    stallguard["value_template"] = "{{ value_json.position }}";
+
+    char stallguardId[32];
+    snprintf(stallguardId, sizeof(stallguardId), "%s_stallguard", id);
+    stallguard["unique_id"] = stallguardId;
 
     
 
@@ -73,6 +85,21 @@ bool GetDeviceDiscoveryPayload(const char* id, char* buffer, size_t bufferSize) 
     char absolutePositionId[32];
     snprintf(absolutePositionId, sizeof(absolutePositionId), "%s_position", id);
     absolutePosition["unique_id"] = absolutePositionId;
+
+
+
+    JsonObject speed = cmps["speed"].to<JsonObject>();
+    speed["p"] = "number";
+    speed["name"] = "position";
+    speed["min"] = 1;
+    speed["max"] = 200;
+
+    snprintf(speedCommandTopic, sizeof(speedCommandTopic), "homeassistant/cover/%s/speed_set", id);
+    speed["command_topic"] = speedCommandTopic;
+    
+    char speedId[32];
+    snprintf(speedId, sizeof(speedId), "%s_speed", id);
+    speed["unique_id"] = speedId;
 
 
 

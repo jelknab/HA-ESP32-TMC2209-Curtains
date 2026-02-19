@@ -64,6 +64,13 @@ static double Monitor_Speed;
 double _lastLocation = 0;
 double _currentLocation = 0;
 
+long minimumPosition = 0;
+long maximumPosition = 0;
+
+// Timing
+unsigned long lastMQTTReconnect = 0;
+unsigned long lastWiFiReconnect = 0;
+
 char deviceID[18];
 
 void motor_init(void);
@@ -81,7 +88,7 @@ WiFiClient espClient;
 void MqttCallback(char *topic, byte *payload, unsigned int length)
 {
     if (strcmp(topic, absolutePositionCommandTopic) == 0) {
-        char msg[length];
+        char msg[length + 1];
 
         memcpy(msg, payload, length);
         msg[length] = '\0';
@@ -91,27 +98,76 @@ void MqttCallback(char *topic, byte *payload, unsigned int length)
         stepper.enableOutputs();
         stepper.moveTo(targetPosition);
     }
+    // Minumum button press 
+    else if (strcmp(topic, minimumButtonCommandTopic) == 0) {
+        minimumPosition = stepper.currentPosition();
+    }
+    // Maximum button press
+    else if (strcmp(topic, maximumButtonCommandTopic) == 0) {
+        maximumPosition = stepper.currentPosition();
+    }
+    // Relative position 0 - 100
+    else if (strcmp(topic, coverCommandTopic) == 0) {
+        char msg[length + 1];
+
+        memcpy(msg, payload, length);
+        msg[length] = '\0';
+
+        long percentOpen = atol(msg);
+
+        long target = minimumPosition + ((maximumPosition - minimumPosition) * percentOpen) / 100L;
+        stepper.moveTo(target);
+    }
+    // Speed set
+    else if (strcmp(topic, speedCommandTopic) == 0) {
+        char msg[length + 1];
+
+        memcpy(msg, payload, length);
+        msg[length] = '\0';
+
+        float speed = atof(msg);
+        stepper.setSpeed(speed);
+    }
 }
 
 PubSubClient pubSubClient(server, 1883, MqttCallback, espClient);
 
 TimerHandle_t sensorTimer;
-void publishPosition() {
+void publishState() {
     // Build the topic dynamically
     char topic[64];
-    snprintf(topic, sizeof(topic),
-             "homeassistant/curtains/%s/state",
-             deviceID);
+    snprintf(topic, sizeof(topic), "homeassistant/curtains/%s/state", deviceID);
 
     // Build JSON payload
     JsonDocument doc;
     doc["position"] = stepper.currentPosition();
+    doc["stallguard"] = driver.SG_RESULT();
 
-    char payload[64];
+    char payload[128];
     serializeJson(doc, payload, sizeof(payload));
 
     // Publish
     pubSubClient.publish(topic, payload);
+}
+
+void publishRelPosition() {
+    long current = stepper.currentPosition();
+
+    // Compute relative position as 0-100% within min-max range
+    long percentage = 0;
+
+    if (maximumPosition != minimumPosition) { // avoid division by zero
+        percentage = ((current - minimumPosition) * 100L) / (maximumPosition - minimumPosition);
+
+        // Clamp between 0-100
+        if (percentage < 0) percentage = 0;
+        if (percentage > 100) percentage = 100;
+    }
+
+    char payload[16];
+    snprintf(payload, sizeof(payload), "%ld", percentage);
+
+    pubSubClient.publish(coverPositionTopic, payload);
 }
 
 void PublishSensors(TimerHandle_t xTimer) 
@@ -119,21 +175,8 @@ void PublishSensors(TimerHandle_t xTimer)
     if (!pubSubClient.connected()) {
         return;
     }
-
-    // JsonDocument doc;
-    
-    // doc["position"] = stepper.currentPosition();
-    // doc["running"] = stepper.isRunning();
-    // doc["stallguard"] = driver.SG_RESULT();
-    // doc["rms"] = driver.cs2rms(driver.cs_actual());
-    // doc["version"] = driver.version();
-    // doc["IOIN"] = driver.IOIN();
-
-    // char buffer[256];
-    // serializeJson(doc, buffer);
-
-    // pubSubClient.publish("test", buffer);
-    publishPosition();
+    publishState();
+    publishRelPosition();
 }
 
 void setup()
@@ -156,6 +199,34 @@ void setup()
     xTimerStart(sensorTimer, pdMS_TO_TICKS( 5000 ));
 }
 
+void handleWiFiReconnect() {
+    if (WiFi.status() != WL_CONNECTED) {
+        unsigned long now = millis();
+        if (now - lastWiFiReconnect > 5000) { // every 5s
+            lastWiFiReconnect = now;
+            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        }
+    }
+}
+
+void handleMQTTReconnect() {
+    if (!pubSubClient.connected() && WiFi.status() == WL_CONNECTED) {
+        unsigned long now = millis();
+        if (now - lastMQTTReconnect > 5000) { // every 5s
+            lastMQTTReconnect = now;
+
+            if (pubSubClient.connect(DEVICE_ID, MQTT_USER, MQTT_PASS)) {
+                // Resubscribe topics
+                pubSubClient.subscribe(absolutePositionCommandTopic);
+                pubSubClient.subscribe(speedCommandTopic);
+                pubSubClient.subscribe(minimumButtonCommandTopic);
+                pubSubClient.subscribe(maximumButtonCommandTopic);
+                pubSubClient.subscribe(coverCommandTopic);
+            }
+        }
+    }
+}
+
 void loop()
 {
     ArduinoOTA.handle();
@@ -164,6 +235,9 @@ void loop()
     if (pubSubClient.connected()) {
         pubSubClient.loop();
     }
+
+    handleWiFiReconnect();
+    handleMQTTReconnect();
 }
 
 void Task1(void *pvParameters)
@@ -187,26 +261,10 @@ void Task2(void *pvParameters)
 {
     bool isConnected = false;
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    Serial.println("scan start");
-
-    int n = WiFi.scanNetworks();
-    Serial.println("scan done");
-    if (n == 0)
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    while (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println("no networks found");
-    }
-    else
-    {
-        if (!isConnected)
-        {
-            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-        }
-        while (WiFi.status() != WL_CONNECTED)
-        {
-            delay(500);
-        }
-        isConnected = true;
+        delay(250);
     }
 
     ArduinoOTA.begin();
@@ -222,6 +280,9 @@ void Task2(void *pvParameters)
 
         pubSubClient.publish(topic, payload);
         pubSubClient.subscribe(absolutePositionCommandTopic);
+        pubSubClient.subscribe(minimumButtonCommandTopic);
+        pubSubClient.subscribe(maximumButtonCommandTopic);
+        pubSubClient.subscribe(coverCommandTopic);
     }
 
     vTaskDelete(NULL);
